@@ -2,6 +2,12 @@
 
 这是一个兼容 OCS 网课助手题库请求格式的 Serverless 接口。
 
+## 路由
+
+- `/`：接口说明首页
+- `/query`：答题接口
+- `/health`：健康检查
+
 ## 接口行为
 
 - 请求方式：`GET`
@@ -26,6 +32,27 @@
 - 多选题返回多个答案，使用 `#` 连接
 - 判断题返回 `正确` 或 `错误`
 - 填空题多个空使用 `#` 连接
+
+## 健康检查
+
+请求：
+
+```text
+GET /health
+```
+
+返回示例：
+
+```json
+{
+  "status": "ok",
+  "env": {
+    "providersConfigured": true,
+    "tokenConfigured": true
+  },
+  "timestamp": "2026-04-15T00:00:00.000Z"
+}
+```
 
 ## 环境变量
 
