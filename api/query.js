@@ -7,6 +7,48 @@ const TYPE_LABELS = {
 };
 
 const DEFAULT_SEPARATORS = ["#", "===", "---", "###", "|", ";", "；"];
+const ANSWER_CACHE = new Map();
+
+function getNumberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getStringEnv(name, fallback) {
+  const value = process.env[name];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function getFastMode() {
+  return getStringEnv("ANSWER_MODE", "consensus").toLowerCase() === "fast";
+}
+
+function buildCacheKey(title, options, type) {
+  return JSON.stringify([normalizeType(type), title || "", options || ""]);
+}
+
+function getCachedAnswer(key) {
+  const ttlMs = getNumberEnv("ANSWER_CACHE_TTL_SECONDS", 3600) * 1000;
+  const cached = ANSWER_CACHE.get(key);
+  if (!cached) {
+    return "";
+  }
+  if (Date.now() - cached.createdAt > ttlMs) {
+    ANSWER_CACHE.delete(key);
+    return "";
+  }
+  return cached.answer || "";
+}
+
+function setCachedAnswer(key, answer) {
+  if (!answer) {
+    return;
+  }
+  ANSWER_CACHE.set(key, {
+    answer,
+    createdAt: Date.now(),
+  });
+}
 
 function normalizeType(type) {
   const value = String(type || "unknown").trim().toLowerCase();
@@ -205,7 +247,8 @@ async function callLLM(provider, systemPrompt, userPrompt) {
     throw new Error("OPENAI_API_KEY 环境变量未配置");
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  let response;
+  response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -218,7 +261,7 @@ async function callLLM(provider, systemPrompt, userPrompt) {
         { role: "user", content: userPrompt },
       ],
       temperature: 0.1,
-      max_tokens: 300,
+      max_tokens: 120,
     }),
   });
 
@@ -233,6 +276,44 @@ async function callLLM(provider, systemPrompt, userPrompt) {
     : "";
 
   return cleanAnswer(content);
+}
+
+async function firstResolved(tasks) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pending = tasks.length;
+    const errors = [];
+
+    if (pending === 0) {
+      reject(new Error("没有可用的答题任务"));
+      return;
+    }
+
+    for (const task of tasks) {
+      task
+        .then((result) => {
+          if (settled) {
+            return;
+          }
+          if (result && result.answer) {
+            settled = true;
+            resolve(result);
+            return;
+          }
+          pending -= 1;
+          if (!pending && !settled) {
+            reject(errors[0] || new Error("所有模型都未返回有效答案"));
+          }
+        })
+        .catch((error) => {
+          errors.push(error);
+          pending -= 1;
+          if (!pending && !settled) {
+            reject(errors[0] || new Error("所有模型都未返回有效答案"));
+          }
+        });
+    }
+  });
 }
 
 function pickMajorityAnswer(candidates, type, optionsText) {
@@ -280,6 +361,12 @@ function buildJudgePrompt(title, options, type, candidates) {
 }
 
 async function resolveAnswer(title, options, type) {
+  const cacheKey = buildCacheKey(title, options, type);
+  const cachedAnswer = getCachedAnswer(cacheKey);
+  if (cachedAnswer) {
+    return cachedAnswer;
+  }
+
   const providers = parseProviders();
   const answerProviders = providers.filter((provider) => provider.role !== "judge");
   const judgeProvider = providers.find((provider) => provider.role === "judge") || answerProviders[0];
@@ -289,15 +376,24 @@ async function resolveAnswer(title, options, type) {
   }
 
   const prompt = buildPrompt(title, options, type);
-  const candidateResults = await Promise.all(
-    answerProviders.map(async (provider) => {
-      const answer = await callLLM(provider, prompt.system, prompt.user);
-      return {
-        provider: provider.name,
-        answer: normalizeCandidate(answer, type, options),
-      };
-    })
-  );
+  const candidateTasks = answerProviders.map(async (provider) => {
+    const answer = await callLLM(provider, prompt.system, prompt.user);
+    return {
+      provider: provider.name,
+      answer: normalizeCandidate(answer, type, options),
+    };
+  });
+
+  if (getFastMode()) {
+    const fastest = await firstResolved(candidateTasks);
+    setCachedAnswer(cacheKey, fastest.answer);
+    return fastest.answer;
+  }
+
+  const settledResults = await Promise.allSettled(candidateTasks);
+  const candidateResults = settledResults
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
 
   const nonEmptyCandidates = candidateResults.filter((item) => item.answer);
   if (nonEmptyCandidates.length === 0) {
@@ -306,13 +402,16 @@ async function resolveAnswer(title, options, type) {
 
   const majority = pickMajorityAnswer(nonEmptyCandidates, type, options);
   if (!majority.needJudge) {
+    setCachedAnswer(cacheKey, majority.answer);
     return majority.answer;
   }
 
   const judgePrompt = buildJudgePrompt(title, options, type, majority.candidates);
   const judgedAnswer = await callLLM(judgeProvider, judgePrompt.system, judgePrompt.user);
   const normalized = normalizeCandidate(judgedAnswer, type, options);
-  return normalized || majority.answer;
+  const finalAnswer = normalized || majority.answer;
+  setCachedAnswer(cacheKey, finalAnswer);
+  return finalAnswer;
 }
 
 async function handler(req, res) {
