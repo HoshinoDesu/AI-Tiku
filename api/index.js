@@ -3,7 +3,7 @@ function handler(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
 
   res.status(200).json({
-    name: "OCS AI 答题接口",
+    name: "AI 答题接口",
     status: "ok",
     endpoints: {
       query: "/query",

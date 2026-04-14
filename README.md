@@ -1,37 +1,68 @@
-# OCS AI 答题接口
+# AI Tiku
 
-这是一个兼容 OCS 网课助手题库请求格式的 Serverless 接口。
+一个兼容常见题库请求格式的 Serverless 答题接口，支持 OpenAI 兼容模型和多模型投票。
+
+## 简介
+
+这个项目提供一个可直接部署到 Vercel 的 HTTP 接口。
+
+接口接收以下参数：
+
+- `token`
+- `title`
+- `options`
+- `type`
+
+接口返回统一的 JSON 结构，适合接入支持自定义题库源的脚本或工具。
 
 ## 路由
 
-- `/`：接口说明首页
+- `/`：接口说明
 - `/query`：答题接口
 - `/health`：健康检查
 
-## 接口行为
+## 返回格式
 
-- 请求方式：`GET`
-- 路径：`/query`
-- 入参：`token`、`title`、`options`、`type`
-- 返回格式：
+`/query` 返回示例：
 
 ```json
 {
   "code": 1,
   "data": {
-    "question": "题目文本",
-    "answer": "答案文本"
+    "question": "鸦片战争发生在哪一年",
+    "answer": "1840年"
   },
   "message": "请求成功"
 }
 ```
 
-其中：
+说明：
 
-- 单选题返回选项内容文本
-- 多选题返回多个答案，使用 `#` 连接
+- 单选题返回选项文本
+- 多选题使用 `#` 连接多个答案
 - 判断题返回 `正确` 或 `错误`
 - 填空题多个空使用 `#` 连接
+
+## 请求参数
+
+请求方式：`GET`
+
+参数说明：
+
+- `token`：访问令牌，可选，取决于是否配置 `API_TOKEN`
+- `title`：题目文本
+- `options`：选项文本，通常按换行分隔
+- `type`：题型
+
+支持的题型值：
+
+- `single`
+- `multiple`
+- `judgement`
+- `completion`
+- `unknown`
+
+同时兼容数字题型值。
 
 ## 健康检查
 
@@ -54,30 +85,43 @@ GET /health
 }
 ```
 
+含义：
+
+- `providersConfigured`：是否已配置模型调用所需环境变量
+- `tokenConfigured`：是否启用了访问令牌校验
+
 ## 环境变量
 
-参考 `.env.example`：
+单模型模式：
 
-- `OPENAI_API_KEY`：必填
-- `OPENAI_BASE_URL`：可选，兼容 OpenAI 格式即可
-- `OPENAI_MODEL`：可选
-- `API_TOKEN`：可选，配置后会校验请求里的 `token`
-- `OPENAI_PROVIDERS`：可选，多模型并行配置，JSON 数组
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `OPENAI_MODEL`
+- `API_TOKEN`
 
-## 多模型模式
+多模型模式：
 
-原题库接口通常只返回一个 `data.answer`，但 OCS 的题库框架本身支持一个题库源返回多个候选结果。
+- `OPENAI_PROVIDERS`
+- `API_TOKEN`
 
-当前这个接口采用的是更稳妥的兼容方案：
+如果配置了 `OPENAI_PROVIDERS`，接口会优先使用该配置。
 
-- 对 OCS 仍然只返回一个最终答案
-- 服务端内部可以并行请求 2 到 3 个不同模型
-- 如果多个模型答案一致，直接采用多数答案
-- 如果多个模型答案冲突，则再交给一个裁决模型选出最终答案
+## 多模型配置
 
-这样不需要改 OCS 侧逻辑，也不会破坏现有 `handler`。
+`OPENAI_PROVIDERS` 是一个 JSON 数组。每个对象支持以下字段：
 
-`OPENAI_PROVIDERS` 示例：
+- `name`
+- `baseUrl`
+- `apiKey`
+- `model`
+- `role`
+
+`role` 可选值：
+
+- `answer`：参与生成候选答案
+- `judge`：当候选答案冲突时负责裁决
+
+示例：
 
 ```json
 [
@@ -105,23 +149,20 @@ GET /health
 ]
 ```
 
-建议：
+工作方式：
 
-- `2` 个 `answer` 模型 + `1` 个 `judge` 模型
-- 或 `3` 个 `answer` 模型，不单独配置 `judge`
+- 多个 `answer` 模型并行返回候选答案
+- 如果结果一致，直接返回
+- 如果结果冲突，使用 `judge` 模型裁决
+- 如果未配置 `judge`，默认使用第一个答题模型参与裁决
 
-注意：
-
-- 多模型会提高正确率，但也会增加响应时间和调用成本
-- Serverless 平台上建议优先使用响应较快的模型
-
-## 在 OCS 中的题库配置
+## 接入示例
 
 ```json
 [
   {
     "name": "AI答题",
-    "homepage": "",
+    "homepage": "https://你的域名.vercel.app/",
     "url": "https://你的域名.vercel.app/query",
     "method": "get",
     "type": "GM_xmlhttpRequest",
@@ -137,14 +178,35 @@ GET /health
 ]
 ```
 
-## 说明
+## 部署到 Vercel
 
-OCS 实际上传给题库的 `type` 通常是：
+1. 将项目推送到 GitHub
+2. 在 Vercel 中导入仓库
+3. 设置环境变量
+4. 部署项目
 
-- `single`
-- `multiple`
-- `judgement`
-- `completion`
-- `unknown`
+部署完成后可访问：
 
-本项目也兼容数字题型值，但推荐直接按 OCS 默认格式传递字符串题型。
+- `https://你的域名.vercel.app/`
+- `https://你的域名.vercel.app/health`
+- `https://你的域名.vercel.app/query`
+
+## 本地开发
+
+可以使用 `.env.local` 配置本地环境变量。
+
+示例：
+
+```env
+OPENAI_API_KEY=sk-xxx
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+API_TOKEN=your-token
+```
+
+或：
+
+```env
+OPENAI_PROVIDERS=[{"name":"deepseek","baseUrl":"https://api.deepseek.com/v1","apiKey":"sk-xxx","model":"deepseek-chat","role":"answer"},{"name":"openai","baseUrl":"https://api.openai.com/v1","apiKey":"sk-xxx","model":"gpt-4o-mini","role":"judge"}]
+API_TOKEN=your-token
+```
