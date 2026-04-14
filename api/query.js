@@ -8,6 +8,7 @@ const TYPE_LABELS = {
 
 const DEFAULT_SEPARATORS = ["#", "===", "---", "###", "|", ";", "；"];
 const ANSWER_CACHE = new Map();
+const RATE_LIMIT_BUCKETS = new Map();
 
 function getNumberEnv(name, fallback) {
   const value = Number(process.env[name]);
@@ -21,6 +22,20 @@ function getStringEnv(name, fallback) {
 
 function getFastMode() {
   return getStringEnv("ANSWER_MODE", "consensus").toLowerCase() === "fast";
+}
+
+function getBooleanEnv(name, fallback) {
+  const value = process.env[name];
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  if (["1", "true", "yes", "on"].includes(value.trim().toLowerCase())) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(value.trim().toLowerCase())) {
+    return false;
+  }
+  return fallback;
 }
 
 function buildCacheKey(title, options, type) {
@@ -44,10 +59,130 @@ function setCachedAnswer(key, answer) {
   if (!answer) {
     return;
   }
+  pruneExpiredCache();
+  const maxEntries = getNumberEnv("ANSWER_CACHE_MAX_ENTRIES", 500);
+  if (!ANSWER_CACHE.has(key) && ANSWER_CACHE.size >= maxEntries) {
+    const oldestKey = ANSWER_CACHE.keys().next().value;
+    if (oldestKey !== void 0) {
+      ANSWER_CACHE.delete(oldestKey);
+    }
+  }
   ANSWER_CACHE.set(key, {
     answer,
     createdAt: Date.now(),
   });
+}
+
+function pruneExpiredCache() {
+  const ttlMs = getNumberEnv("ANSWER_CACHE_TTL_SECONDS", 3600) * 1000;
+  for (const [key, value] of ANSWER_CACHE.entries()) {
+    if (Date.now() - value.createdAt > ttlMs) {
+      ANSWER_CACHE.delete(key);
+    }
+  }
+}
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return String(forwarded[0]).split(",")[0].trim();
+  }
+  return String(req.socket?.remoteAddress || "unknown");
+}
+
+function checkRateLimit(req) {
+  const enabled = getBooleanEnv("RATE_LIMIT_ENABLED", true);
+  if (!enabled) {
+    return { ok: true, retryAfter: 0 };
+  }
+
+  const windowMs = getNumberEnv("RATE_LIMIT_WINDOW_SECONDS", 60) * 1000;
+  const maxRequests = getNumberEnv("RATE_LIMIT_MAX_REQUESTS", 30);
+  const key = getClientIp(req);
+  const now = Date.now();
+
+  for (const [bucketKey, bucket] of RATE_LIMIT_BUCKETS.entries()) {
+    if (now - bucket.startAt >= windowMs) {
+      RATE_LIMIT_BUCKETS.delete(bucketKey);
+    }
+  }
+
+  const bucket = RATE_LIMIT_BUCKETS.get(key);
+  if (!bucket || now - bucket.startAt >= windowMs) {
+    RATE_LIMIT_BUCKETS.set(key, { count: 1, startAt: now });
+    return { ok: true, retryAfter: 0 };
+  }
+
+  if (bucket.count >= maxRequests) {
+    return {
+      ok: false,
+      retryAfter: Math.max(1, Math.ceil((windowMs - (now - bucket.startAt)) / 1000)),
+    };
+  }
+
+  bucket.count += 1;
+  return { ok: true, retryAfter: 0 };
+}
+
+function extractBearerToken(req) {
+  const auth = req.headers.authorization;
+  if (typeof auth !== "string") {
+    return "";
+  }
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+async function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    let failed = false;
+    req.on("data", (chunk) => {
+      if (failed) {
+        return;
+      }
+      raw += chunk;
+      if (raw.length > getNumberEnv("MAX_BODY_CHARS", 20000)) {
+        failed = true;
+        reject(new Error("请求体过大"));
+      }
+    });
+    req.on("end", () => {
+      if (failed) {
+        return;
+      }
+      if (!raw.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch (_) {
+        reject(new Error("请求体不是合法 JSON"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function validateInput(title, options) {
+  const maxTitleChars = getNumberEnv("MAX_TITLE_CHARS", 500);
+  const maxOptionsChars = getNumberEnv("MAX_OPTIONS_CHARS", 4000);
+  const maxTotalChars = getNumberEnv("MAX_TOTAL_CHARS", 5000);
+
+  if (title.length > maxTitleChars) {
+    return `title 过长，最大 ${maxTitleChars} 个字符`;
+  }
+  if (options.length > maxOptionsChars) {
+    return `options 过长，最大 ${maxOptionsChars} 个字符`;
+  }
+  if (title.length + options.length > maxTotalChars) {
+    return `请求内容过长，最大 ${maxTotalChars} 个字符`;
+  }
+  return "";
 }
 
 function normalizeType(type) {
@@ -267,7 +402,12 @@ async function callLLM(provider, systemPrompt, userPrompt) {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`LLM API 请求失败 (${response.status}): ${errorText}`);
+    console.error("LLM API error", {
+      provider: provider.name,
+      status: response.status,
+      body: errorText,
+    });
+    throw new Error("上游模型服务不可用");
   }
 
   const data = await response.json();
@@ -416,7 +556,7 @@ async function resolveAnswer(title, options, type) {
 
 async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") {
@@ -424,16 +564,35 @@ async function handler(req, res) {
     return;
   }
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "POST") {
     res.status(405).json({ code: -1, message: "Method Not Allowed" });
     return;
   }
 
-  const query = req.query || {};
-  const token = query.token;
-  const title = typeof query.title === "string" ? query.title.trim() : "";
-  const options = typeof query.options === "string" ? query.options.trim() : "";
-  const type = normalizeType(query.type);
+  const rateLimit = checkRateLimit(req);
+  if (!rateLimit.ok) {
+    res.setHeader("Retry-After", String(rateLimit.retryAfter));
+    res.status(429).json({ code: -1, message: "请求过于频繁，请稍后再试" });
+    return;
+  }
+
+  let input;
+  try {
+    input = req.method === "POST" ? await readJsonBody(req) : (req.query || {});
+  } catch (error) {
+    res.status(400).json({
+      code: -1,
+      message: error && error.message ? error.message : "请求格式错误",
+    });
+    return;
+  }
+
+  const queryToken = typeof input.token === "string" ? input.token.trim() : "";
+  const headerToken = extractBearerToken(req);
+  const token = headerToken || queryToken;
+  const title = typeof input.title === "string" ? input.title.trim() : "";
+  const options = typeof input.options === "string" ? input.options.trim() : "";
+  const type = normalizeType(input.type);
 
   const validToken = process.env.API_TOKEN || "";
   if (validToken && token !== validToken) {
@@ -443,6 +602,12 @@ async function handler(req, res) {
 
   if (!title) {
     res.status(400).json({ code: -1, message: "缺少 title 参数" });
+    return;
+  }
+
+  const inputError = validateInput(title, options);
+  if (inputError) {
+    res.status(400).json({ code: -1, message: inputError });
     return;
   }
 
@@ -461,7 +626,7 @@ async function handler(req, res) {
     console.error("答题接口错误:", error);
     res.status(500).json({
       code: -1,
-      message: error && error.message ? error.message : "服务器内部错误",
+      message: "服务器内部错误",
     });
   }
 }
