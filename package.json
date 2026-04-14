@@ -1,0 +1,9 @@
+{
+  "name": "ai-question-api",
+  "version": "1.0.0",
+  "description": "AI答题接口 - 兼容题库请求格式，使用大模型回答问题",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
