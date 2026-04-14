@@ -51,6 +51,46 @@ function splitAnswer(answer) {
   return [text];
 }
 
+function parseOptionLines(optionsText) {
+  return String(optionsText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([A-Z])[\.、:：)）\s-]*(.*)$/i);
+      if (!match) {
+        return { key: "", text: line };
+      }
+      return {
+        key: match[1].toUpperCase(),
+        text: cleanAnswer(match[2] || line),
+      };
+    });
+}
+
+function mapLetterAnswerToOption(answer, optionsText) {
+  const value = cleanAnswer(answer).replace(/[,，、\s#]/g, "").toUpperCase();
+  if (!/^[A-Z]+$/.test(value) || value.length === 0 || value.length > 8) {
+    return "";
+  }
+
+  const options = parseOptionLines(optionsText);
+  if (options.length === 0) {
+    return "";
+  }
+
+  const mapped = [];
+  for (const char of value) {
+    const found = options.find((option) => option.key === char);
+    if (!found || !found.text) {
+      return "";
+    }
+    mapped.push(found.text);
+  }
+
+  return uniqueList(mapped).join("#");
+}
+
 function uniqueList(items) {
   return Array.from(new Set(items.filter(Boolean)));
 }
@@ -69,7 +109,17 @@ function normalizeJudgementAnswer(answer) {
   return cleanAnswer(answer);
 }
 
-function normalizeCandidate(answer, type) {
+function normalizeCandidate(answer, type, optionsText) {
+  const mappedFromLetters = mapLetterAnswerToOption(answer, optionsText);
+  if (mappedFromLetters) {
+    if (type === "single") {
+      return splitAnswer(mappedFromLetters)[0] || mappedFromLetters;
+    }
+    if (type === "multiple" || type === "completion" || type === "unknown") {
+      return mappedFromLetters;
+    }
+  }
+
   if (type === "judgement") {
     return normalizeJudgementAnswer(answer);
   }
@@ -185,10 +235,10 @@ async function callLLM(provider, systemPrompt, userPrompt) {
   return cleanAnswer(content);
 }
 
-function pickMajorityAnswer(candidates, type) {
+function pickMajorityAnswer(candidates, type, optionsText) {
   const counter = new Map();
   for (const candidate of candidates) {
-    const normalized = normalizeCandidate(candidate.answer, type);
+    const normalized = normalizeCandidate(candidate.answer, type, optionsText);
     if (!normalized) {
       continue;
     }
@@ -244,7 +294,7 @@ async function resolveAnswer(title, options, type) {
       const answer = await callLLM(provider, prompt.system, prompt.user);
       return {
         provider: provider.name,
-        answer: normalizeCandidate(answer, type),
+        answer: normalizeCandidate(answer, type, options),
       };
     })
   );
@@ -254,14 +304,14 @@ async function resolveAnswer(title, options, type) {
     throw new Error("所有模型都未返回有效答案");
   }
 
-  const majority = pickMajorityAnswer(nonEmptyCandidates, type);
+  const majority = pickMajorityAnswer(nonEmptyCandidates, type, options);
   if (!majority.needJudge) {
     return majority.answer;
   }
 
   const judgePrompt = buildJudgePrompt(title, options, type, majority.candidates);
   const judgedAnswer = await callLLM(judgeProvider, judgePrompt.system, judgePrompt.user);
-  const normalized = normalizeCandidate(judgedAnswer, type);
+  const normalized = normalizeCandidate(judgedAnswer, type, options);
   return normalized || majority.answer;
 }
 
