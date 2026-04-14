@@ -110,39 +110,39 @@ function buildPrompt(title, options, rawType) {
   const type = normalizeType(rawType);
   const label = TYPE_LABELS[type] || TYPE_LABELS.unknown;
   const optionsText = options ? `\n选项：\n${options}` : "";
-  const baseRule = "你是题库答题接口。只输出最终答案，不解释，不分析，不输出多余文字。";
+  const baseRule = "你是题库答题助手。严格遵循以下规则：\n1. 只输出最终答案，不解释、不分析、不输出任何多余文字\n2. 不要输出\"答案是\"\"正确答案\"等前缀\n3. 不要复述题目内容\n4. 若不确定，输出最可能的答案";
 
   if (type === "single") {
     return {
-      system: `${baseRule}\n这是单选题。直接输出正确选项的内容文本，不要输出选项字母，不要带前缀。`,
-      user: `题型：${label}\n题目：${title}${optionsText}`,
+      system: `${baseRule}\n题型：单选题\n输出要求：仅输出正确选项的完整文字内容，不要输出选项字母（如A/B/C/D）。`,
+      user: `题目：${title}${optionsText}`,
     };
   }
 
   if (type === "multiple") {
     return {
-      system: `${baseRule}\n这是多选题。输出所有正确选项的内容文本，使用 # 连接，例如 苹果#香蕉。不要输出选项字母。`,
-      user: `题型：${label}\n题目：${title}${optionsText}`,
+      system: `${baseRule}\n题型：多选题\n输出要求：输出所有正确选项的完整文字内容，多个答案之间用 # 连接，例如：苹果#香蕉#橙子。不要输出选项字母。`,
+      user: `题目：${title}${optionsText}`,
     };
   }
 
   if (type === "judgement") {
     return {
-      system: `${baseRule}\n这是判断题。正确只输出“正确”，错误只输出“错误”。`,
-      user: `题型：${label}\n题目：${title}`,
+      system: `${baseRule}\n题型：判断题\n输出要求：正确则仅输出\"正确\"二字，错误则仅输出\"错误\"二字。不要输出其他任何内容。`,
+      user: `题目：${title}`,
     };
   }
 
   if (type === "completion") {
     return {
-      system: `${baseRule}\n这是填空题或简答填空。若有多个空，使用 # 连接每个答案；若只有一个空，直接输出答案文本。`,
-      user: `题型：${label}\n题目：${title}${optionsText}`,
+      system: `${baseRule}\n题型：填空题\n输出要求：若有多个空，用 # 连接各答案，例如：北京#2023；若只有一个空，直接输出答案。`,
+      user: `题目：${title}${optionsText}`,
     };
   }
 
   return {
-    system: `${baseRule}\n根据题目和选项直接输出最可能的答案文本。若有多个答案，使用 # 连接。`,
-    user: `题型：${label}\n题目：${title}${optionsText}`,
+    system: `${baseRule}\n题型：未知题型\n输出要求：根据题目内容给出最可能的答案。若有多个答案，用 # 连接。`,
+    user: `题目：${title}${optionsText}`,
   };
 }
 
@@ -221,11 +221,11 @@ function pickMajorityAnswer(candidates, type) {
 function buildJudgePrompt(title, options, type, candidates) {
   const label = TYPE_LABELS[type] || TYPE_LABELS.unknown;
   const optionsText = options ? `\n选项：\n${options}` : "";
-  const candidateLines = candidates.map((item, index) => `${index + 1}. ${item.answer}`).join("\n");
+  const candidateLines = candidates.map((item, index) => `候选${index + 1}：${item.answer}（${item.votes}票）`).join("\n");
 
   return {
-    system: "你是题库答案裁决器。你会在多个候选答案中选出最可能正确的唯一最终答案。只输出最终答案，不解释。",
-    user: `题型：${label}\n题目：${title}${optionsText}\n候选答案：\n${candidateLines}`,
+    system: "你是题库答案裁决器。你的任务是从多个候选答案中选出唯一正确的答案。\n严格规则：\n1. 综合分析题目内容和所有候选答案\n2. 只输出最终答案，不解释、不分析\n3. 不要输出\"正确答案是\"等前缀\n4. 若候选答案中有明显错误，忽略它\n5. 输出格式必须与题型匹配",
+    user: `题型：${label}\n题目：${title}${optionsText}\n\n各模型给出的候选答案及票数：\n${candidateLines}\n\n请选出唯一正确答案，直接输出答案内容。`,
   };
 }
 
